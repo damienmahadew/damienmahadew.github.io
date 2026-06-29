@@ -1946,7 +1946,8 @@ function startExtTest(testId){
   if(!test) return;
   const questions = test.questions;
   const passCount = Math.ceil(questions.length * 0.75);
-  extTestState = {testId, testName:test.name, questions, answers:new Array(questions.length).fill(-1), current:0, timeLeft:45*60, passCount};
+  const initAnswers = questions.map(q=>((q.correctAll||[q.correct]).length>1) ? [] : -1);
+  extTestState = {testId, testName:test.name, questions, answers:initAnswers, current:0, timeLeft:45*60, passCount};
   document.getElementById('ext-list').style.display='none';
   document.getElementById('ext-active').style.display='block';
   document.getElementById('ext-results').style.display='none';
@@ -1977,13 +1978,25 @@ function renderExtQuestion(){
   const opts = q.opts || q.options || [];
   // Support both single correct and correctAll (multi-answer)
   const correctAll = q.correctAll || [q.correct];
-  const userAnswer = answers[current];
-  const isCorrect = answered && correctAll.includes(userAnswer);
-
+    const userAnswer = answers[current]; // may be int or array
+  const isMulti = correctAll.length > 1;
+  // For multi-answer: answered when array has required count; for single: answered when !== -1
+  const answered2 = isMulti
+    ? Array.isArray(userAnswer) && userAnswer.length === correctAll.length
+    : userAnswer !== -1;
+  const isCorrect2 = answered2 && (
+    isMulti
+      ? correctAll.every(c=>userAnswer.includes(c))
+      : correctAll.includes(userAnswer)
+  );
   // Score
-  const totalAnswered = answers.filter(a=>a!==-1).length;
+  const totalAnswered = answers.filter((a,i)=>{
+    const ca2 = questions[i].correctAll || [questions[i].correct];
+    return ca2.length>1 ? Array.isArray(a)&&a.length===ca2.length : a!==-1;
+  }).length;
   const totalCorrect = answers.filter((a,i)=>{
     const ca = questions[i].correctAll || [questions[i].correct];
+    if(ca.length>1) return Array.isArray(a)&&ca.every(c=>a.includes(c));
     return ca.includes(a);
   }).length;
   const pct = totalAnswered>0 ? Math.round(totalCorrect/totalAnswered*100) : 0;
@@ -2000,37 +2013,47 @@ function renderExtQuestion(){
   document.getElementById('ext-q-dots').innerHTML = questions.map((_,i)=>{
     let cls='q-dot';
     if(i===current) cls+=' current';
-    else if(answers[i]!==-1){
+    else {
       const ca = questions[i].correctAll || [questions[i].correct];
-      cls += ca.includes(answers[i]) ? ' answered-correct' : ' answered-wrong';
+      const a = answers[i];
+      const isAnswered = ca.length>1 ? Array.isArray(a)&&a.length===ca.length : a!==-1;
+      if(isAnswered){
+        const isRight = ca.length>1 ? ca.every(c=>a.includes(c)) : ca.includes(a);
+        cls += isRight ? ' answered-correct' : ' answered-wrong';
+      }
     }
     return `<div class="${cls}" onclick="extJumpTo(${i})">${i+1}</div>`;
   }).join('');
 
   // Question
   const multiAnswer = correctAll.length > 1;
+  const selectedArr = isMulti ? (Array.isArray(userAnswer) ? userAnswer : []) : [];
   document.getElementById('ext-q-area').innerHTML = `
     <div class="q-card">
-      <div class="q-num">Question ${current+1} of ${questions.length}${multiAnswer?' · Select ALL that apply':''}</div>
+      <div class="q-num">Question ${current+1} of ${questions.length}${multiAnswer?` · <strong>Select TWO answers</strong>`:''}</div>
       <div class="q-text">${q.q}</div>
     </div>
     <div class="options">
       ${opts.map((opt,i)=>{
         let cls='option-btn';
-        if(answered){
+        if(answered2){
           if(correctAll.includes(i)) cls+=' correct';
-          else if(i===userAnswer) cls+=' wrong';
+          else if(isMulti ? selectedArr.includes(i) : i===userAnswer) cls+=' wrong';
           else cls+=' neutral-answered';
+        } else if(isMulti && selectedArr.includes(i)) {
+          cls+=' selected-pre';
         }
-        return `<button class="${cls}" onclick="${answered?'':'selectExtAnswer('+i+')'}" ${answered?'disabled':''}>
-          <div class="option-letter">${'ABCD'[i]||i}</div>
+        const clickHandler = answered2 ? '' : (isMulti ? `toggleExtMulti(${i})` : `selectExtAnswer(${i})`);
+        return `<button class="${cls}" onclick="${clickHandler}" ${answered2?'disabled':''}>
+          <div class="option-letter">${isMulti?(selectedArr.includes(i)?'✓':'ABCD'[i]):'ABCD'[i]}</div>
           <div>${opt}</div>
         </button>`;
       }).join('')}
     </div>
-    ${answered?`
-      <div class="explanation-box ${isCorrect?'correct':'wrong'}">
-        <div class="exp-label">${isCorrect?'✓ Correct':'✗ Wrong'}</div>
+    ${isMulti && !answered2 ? `<div style="font-size:13px;color:var(--muted);margin-bottom:8px">Selected ${selectedArr.length}/2 — select one more to confirm</div>` : ''}
+    ${answered2?`
+      <div class="explanation-box ${isCorrect2?'correct':'wrong'}">
+        <div class="exp-label">${isCorrect2?'✓ Correct':'✗ Wrong'}</div>
         ${multiAnswer
           ? `The correct answers are: ${correctAll.map(j=>`<strong>${'ABCD'[j]}: ${opts[j]}</strong>`).join(' and ')}`
           : `The correct answer is: <strong>${'ABCD'[correctAll[0]]}: ${opts[correctAll[0]]||''}</strong>`
@@ -2054,7 +2077,7 @@ function renderExtQuestion(){
   `;
 
   // Auto-advance
-  if(answered && current < questions.length-1){
+  if(answered2 && current < questions.length-1){
     let countdown=5;
     const fillEl=document.getElementById('ext-advance-fill');
     const countEl=document.getElementById('ext-countdown');
@@ -2079,6 +2102,16 @@ function skipExtAdvance(){
 
 function selectExtAnswer(i){
   extTestState.answers[extTestState.current]=i;
+  renderExtQuestion();
+}
+function toggleExtMulti(i){
+  const cur=extTestState.current;
+  const q=extTestState.questions[cur];
+  const correctAll=q.correctAll||[q.correct];
+  let arr=Array.isArray(extTestState.answers[cur])?[...extTestState.answers[cur]]:[];
+  if(arr.includes(i)){ arr=arr.filter(x=>x!==i); }
+  else if(arr.length<correctAll.length){ arr.push(i); }
+  extTestState.answers[cur]=arr;
   renderExtQuestion();
 }
 
@@ -2107,6 +2140,7 @@ function submitExtTest(){
   const {questions,answers,testId,testName,passCount} = extTestState;
   const correct = answers.filter((a,i)=>{
     const ca = questions[i].correctAll || [questions[i].correct];
+    if(ca.length>1) return Array.isArray(a)&&ca.every(c=>a.includes(c));
     return ca.includes(a);
   }).length;
   const total = questions.length;
@@ -2131,16 +2165,22 @@ function renderExtAnswerReview(questions,answers){
     const opts = q.opts || q.options || [];
     const correctAll = q.correctAll || [q.correct];
     const userAnswer = answers[i];
-    const isCorrect = correctAll.includes(userAnswer);
+    const isMultiQ = correctAll.length > 1;
+    const selectedArr = isMultiQ ? (Array.isArray(userAnswer) ? userAnswer : []) : [];
+    const isCorrect = isMultiQ
+      ? Array.isArray(userAnswer) && correctAll.every(c=>userAnswer.includes(c))
+      : correctAll.includes(userAnswer);
     return `<div class="review-item">
-      <div class="review-q">${i+1}. ${q.q}</div>
+      <div class="review-q">${i+1}. ${q.q}${isMultiQ?' <span style="font-size:11px;background:#fef3c7;padding:1px 5px;border-radius:4px;color:#92400e">SELECT TWO</span>':''}</div>
       ${opts.map((opt,j)=>{
         let cls='review-option neutral';
-        if(correctAll.includes(j)) cls='review-option correct';
-        else if(j===userAnswer) cls='review-option wrong';
+        const isCorrectOpt = correctAll.includes(j);
+        const isUserOpt = isMultiQ ? selectedArr.includes(j) : j===userAnswer;
+        if(isCorrectOpt) cls='review-option correct';
+        else if(isUserOpt) cls='review-option wrong';
         return `<div class="${cls}">
           <div class="review-letter">${'ABCD'[j]||j}</div>
-          <div>${opt}${correctAll.includes(j)?' ✓':j===userAnswer?' ✗':''}</div>
+          <div>${opt}${isCorrectOpt?' ✓':isUserOpt?' ✗':''}</div>
         </div>`;
       }).join('')}
     </div>`;
@@ -2168,6 +2208,7 @@ function renderMapPicker(){
 function selectMap(id){
   currentMap=id;
   mapTransform={x:0,y:0,scale:1};
+  _mapListenersAttached=false;
   renderMapPicker();
 }
 
@@ -2208,6 +2249,7 @@ function renderMap(){
 
 function applyMapTransform(){
   const canvas=document.getElementById('map-canvas');
+  if(!canvas) return;
   canvas.style.transform=`translate(${mapTransform.x}px,${mapTransform.y}px) scale(${mapTransform.scale})`;
 }
 
@@ -2221,13 +2263,11 @@ function resetMapView(){
   applyMapTransform();
 }
 
+let _mapListenersAttached=false;
 function setupMapInteraction(){
-  const wrap=document.getElementById('map-canvas-wrap');
-  // Remove old listeners
-  const newWrap=wrap.cloneNode(false);
-  wrap.parentNode.replaceChild(newWrap,wrap);
-  newWrap.appendChild(document.getElementById('map-canvas'));
-  newWrap.appendChild(document.querySelector('.map-controls'));
+  const newWrap=document.getElementById('map-canvas-wrap');
+  if(!newWrap||_mapListenersAttached) return;
+  _mapListenersAttached=true;
   // Mouse
   newWrap.addEventListener('mousedown',e=>{
     if(e.target.closest('[onclick*="openNodePanel"]')) return;
